@@ -202,3 +202,5 @@ class CryptoMiningApp:
                 else:
                     print("Mining already in progress.")
             elif choice == "2
+
+ok
