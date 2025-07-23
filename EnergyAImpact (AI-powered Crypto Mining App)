@@ -1,83 +1,204 @@
-from flask import Flask, jsonify, request
-import requests
-import pandas as pd
+import hashlib
+import time
+import random
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor
-import os
+import gym
+from gym import spaces
+import psutil
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_util import make_vec_env
+import threading
+import logging
+from datetime import datetime
 
-app = Flask(__name__)
+# Set up logging for transparency
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+logger = logging.getLogger()
 
-# API configurations
-COINGECKO_API = "https://api.coingecko.com/api/v3"
-ENERGY_API = "https://api.example.com/energy-prices"  # Replace with real API
+# Simulated blockchain block (from previous code)
+class Block:
+    def __init__(self, index, previous_hash, transactions, timestamp):
+        self.index = index
+        self.previous_hash = previous_hash
+        self.transactions = transactions
+        self.timestamp = timestamp
+        self.nonce = 0
+        self.hash = self.calculate_hash()
 
-# Fetch crypto prices
-def get_crypto_prices(coins=["bitcoin", "ethereum"]):
-    try:
-        url = f"{COINGECKO_API}/simple/price?ids={','.join(coins)}&vs_currencies=usd"
-        response = requests.get(url).json()
-        return {coin: response[coin]["usd"] for coin in coins}
-    except Exception as e:
-        print(f"Error fetching prices: {e}")
-        return {}
+    def calculate_hash(self):
+        block_string = f"{self.index}{self.previous_hash}{self.transactions}{self.nonce}{self.timestamp}"
+        return hashlib.sha256(block_string.encode()).hexdigest()
 
-# Fetch energy prices (mock)
-def get_energy_price():
-    try:
-        # Replace with real energy API
-        return 0.12  # $0.12/kWh (mock value)
-    except:
-        return 0.12
+# Custom Gym Environment for Crypto Mining
+class CryptoMiningEnv(gym.Env):
+    def __init__(self):
+        super(CryptoMiningEnv, self).__init__()
+        # State: [energy_cost, hardware_load, difficulty, coin_price, pool_fee]
+        self.observation_space = spaces.Box(low=np.array([0.0, 0.0, 1.0, 10000.0, 0.0]),
+                                           high=np.array([0.2, 1.0, 20.0, 100000.0, 0.1]),
+                                           dtype=np.float32)
+        # Action: [mining_intensity (0-1), pool_choice (0-2 for 3 pools)]
+        self.action_space = spaces.Tuple((
+            spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
+            spaces.Discrete(3)
+        ))
+        self.state = None
+        self.step_count = 0
+        self.max_steps = 100  # Limit episode length
+        self.blocks_mined = 0
+        self.balance = 0.0
+        self.difficulty = 4  # Leading zeros for PoW
 
-# Train AI model for profitability
-def train_model():
-    # Sample data (replace with real dataset)
-    data = {
-        "price_usd": [50000, 51000, 49000, 52000],
-        "difficulty": [20e9, 21e9, 19e9, 22e9],
-        "energy_cost": [0.12, 0.15, 0.10, 0.13],
-        "hashrate": [100, 120, 110, 130],
-        "profit": [0.001, 0.0012, 0.0009, 0.0013]
-    }
-    df = pd.DataFrame(data)
-    X = df[["price_usd", "difficulty", "energy_cost", "hashrate"]]
-    y = df["profit"]
-    
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
-    model.fit(X, y)
-    return model
+    def reset(self):
+        # Initialize state with simulated real-time data
+        self.state = np.array([
+            random.uniform(0.03, 0.08),  # Energy cost
+            psutil.cpu_percent() / 100,  # Hardware load
+            10.0,  # Simulated difficulty
+            random.uniform(55000, 65000),  # Coin price
+            random.uniform(0.01, 0.04)  # Pool fee
+        ], dtype=np.float32)
+        self.step_count = 0
+        return self.state
 
-# Predict profitability
-def predict_profit(model, price, difficulty, energy_cost, hashrate=100):
-    features = np.array([[price, difficulty, energy_cost, hashrate]])
-    return model.predict(features)[0]
+    def step(self, action):
+        intensity, pool_choice = action[0][0], action[1]
+        # Simulate mining with intensity and pool choice
+        energy_cost, hardware_load, difficulty, coin_price, pool_fee = self.state
 
-# API endpoint for mining optimization
-@app.route("/optimize", methods=["GET"])
-def optimize_mining():
-    coins = ["bitcoin", "ethereum"]
-    energy_cost = get_energy_price()
-    prices = get_crypto_prices(coins)
-    model = train_model()
-    
-    results = []
-    for coin in coins:
-        price = prices.get(coin, 0)
-        difficulty = get_mining_data(coin).get("difficulty", 20e9)  # Mock function
-        profit = predict_profit(model, price, difficulty, energy_cost)
-        results.append({"coin": coin, "profit": profit, "price": price})
-    
-    best_coin = max(results, key=lambda x: x["profit"], default=None)
-    return jsonify({
-        "best_coin": best_coin["coin"],
-        "profit": best_coin["profit"],
-        "energy_cost": energy_cost,
-        "timestamp": datetime.now().isoformat()
-    })
+        # Simulate Proof-of-Work
+        block = Block(self.blocks_mined + 1, "0" * 64 if self.blocks_mined == 0 else "0" * 64,
+                      f"TransactionData{self.blocks_mined + 1}", str(datetime.now()))
+        target = "0" * int(difficulty)
+        start_time = time.time()
+        mined = False
+        for _ in range(int(1000 * intensity)):  # Scale iterations by intensity
+            block.nonce += 1
+            block.hash = block.calculate_hash()
+            if block.hash[:int(difficulty)] == target:
+                mined = True
+                break
+        elapsed_time = time.time() - start_time
 
-# Mock mining data function
-def get_mining_data(coin):
-    return {"difficulty": 20e9}  # Replace with real API call
+        # Calculate reward
+        block_reward = 0.001 * intensity * (1 - pool_fee) if mined else 0
+        energy_penalty = energy_cost * intensity * elapsed_time
+        hardware_penalty = 0.1 * max(0, hardware_load - 0.8)  # Penalize high load
+        reward = block_reward * coin_price - energy_penalty - hardware_penalty
 
-if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+        if mined:
+            self.blocks_mined += 1
+            self.balance += block_reward
+            logger.info(f"Block Mined! Intensity: {intensity:.2f}, Pool: {pool_choice}, Reward: {reward:.4f}")
+
+        # Update state with new simulated data
+        self.state = np.array([
+            random.uniform(0.03, 0.08),
+            psutil.cpu_percent() / 100,
+            difficulty + random.uniform(-0.5, 0.5),
+            random.uniform(55000, 65000),
+            random.uniform(0.01, 0.04)
+        ], dtype=np.float32)
+
+        self.step_count += 1
+        done = self.step_count >= self.max_steps
+        info = {"balance": self.balance, "blocks_mined": self.blocks_mined}
+        return self.state, reward, done, info
+
+    def render(self):
+        logger.info(f"State: {self.state}, Balance: {self.balance:.6f} BTC")
+
+# AI Agent for Crypto Mining
+class AIAgent:
+    def __init__(self):
+        # Create vectorized environment
+        self.env = make_vec_env(lambda: CryptoMiningEnv(), n_envs=1)
+        # Initialize PPO model
+        self.model = PPO("MlpPolicy", self.env, verbose=1, learning_rate=0.0003)
+        self.training_steps = 10000  # Adjust for more training in production
+
+    def train(self):
+        logger.info("Training AI agent...")
+        self.model.learn(total_timesteps=self.training_steps)
+        logger.info("Training completed.")
+
+    def optimize_mining_params(self):
+        obs = self.env.reset()
+        action, _ = self.model.predict(obs)
+        intensity, pool_choice = action[0][0], action[1]
+        return intensity, pool_choice
+
+# Modified CryptoMiningApp to use AI Agent
+class CryptoMiningApp:
+    def __init__(self):
+        self.agent = AIAgent()
+        self.blocks_mined = 0
+        self.balance = 0.0
+        self.running = False
+        self.difficulty = 4
+        self.mining_thread = None
+
+    def proof_of_work(self, block, intensity):
+        target = "0" * self.difficulty
+        start_time = time.time()
+        for _ in range(int(1000 * intensity)):
+            block.nonce += 1
+            block.hash = block.calculate_hash()
+            if block.hash[:self.difficulty] == target:
+                elapsed_time = time.time() - start_time
+                logger.info(f"Block mined! Nonce: {block.nonce}, Time: {elapsed_time:.2f}s")
+                return True
+        return False
+
+    def mine_block(self):
+        index = self.blocks_mined + 1
+        previous_hash = "0" * 64 if index == 1 else self.last_block.hash
+        transactions = f"TransactionData{index}"
+        timestamp = str(datetime.now())
+        block = Block(index, previous_hash, transactions, timestamp)
+
+        # Get AI-optimized parameters
+        intensity, pool_choice = self.agent.optimize_mining_params()
+        logger.info(f"AI Action: Intensity={intensity:.2f}, Pool={pool_choice}")
+
+        if self.proof_of_work(block, intensity):
+            self.blocks_mined += 1
+            pool_fee = random.uniform(0.01, 0.04)
+            self.balance += 0.001 * intensity * (1 - pool_fee)
+            self.last_block = block
+            logger.info(f"Balance: {self.balance:.6f} BTC")
+
+    def start_mining(self):
+        self.running = True
+        logger.info("Starting AI-powered crypto mining...")
+        self.agent.train()  # Train the agent
+        while self.running:
+            self.mine_block()
+            time.sleep(1)
+
+    def stop_mining(self):
+        self.running = False
+        if self.mining_thread:
+            self.mining_thread.join()
+        logger.info("Mining stopped.")
+
+    def monitor_mining(self):
+        while self.running:
+            logger.info(f"Status: Mining, Blocks Mined: {self.blocks_mined}, Balance: {self.balance:.6f} BTC")
+            time.sleep(5)
+
+    def run(self):
+        logger.info("=== AI-Powered Crypto Mining App ===")
+        print("1. Start Mining\n2. Stop Mining\n3. Check Balance\n4. Exit")
+        
+        while True:
+            choice = input("Enter choice (1-4): ")
+            if choice == "1":
+                if not self.running:
+                    self.mining_thread = threading.Thread(target=self.start_mining)
+                    monitor_thread = threading.Thread(target=self.monitor_mining)
+                    self.mining_thread.start()
+                    monitor_thread.start()
+                else:
+                    print("Mining already in progress.")
+            elif choice == "2
